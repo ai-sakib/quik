@@ -1,0 +1,91 @@
+rules_version = '2';
+
+// Who may read and write what. Deploy with: npx firebase-tools deploy --only firestore
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isMe(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    function conversation(conversationId) {
+      return get(/databases/$(database)/documents/conversations/$(conversationId)).data;
+    }
+
+    function isMemberOf(conversationId) {
+      return signedIn() && request.auth.uid in conversation(conversationId).memberIds;
+    }
+
+    function isInCallGroup(callId) {
+      return signedIn()
+        && request.auth.uid in get(/databases/$(database)/documents/calls/$(callId)).data.memberIds;
+    }
+
+    function onlyChanges(fields) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(fields);
+    }
+
+    // A 1:1 conversation's id is derived from its two members (see directConversationId()).
+    function isValidNewConversation(conversationId) {
+      let data = request.resource.data;
+      return request.auth.uid in data.memberIds
+        && data.createdBy == request.auth.uid
+        && (data.type == 'group'
+          || (data.type == 'direct'
+            && data.memberIds.size() == 2
+            && conversationId == 'direct_' + data.memberIds[0] + '_' + data.memberIds[1]));
+    }
+
+    // Profiles: every signed-in user can find people, but only edit their own profile.
+    match /users/{userId} {
+      allow read: if signedIn();
+      allow write: if isMe(userId);
+    }
+
+    match /conversations/{conversationId} {
+      // `resource == null` lets openDirect() check whether a 1:1 chat exists yet.
+      allow get: if signedIn() && (resource == null || request.auth.uid in resource.data.memberIds);
+      allow list: if signedIn() && request.auth.uid in resource.data.memberIds;
+      allow create: if signedIn() && isValidNewConversation(conversationId);
+      // Members update the preview and call status, but can't change who is in the conversation.
+      allow update: if signedIn()
+        && request.auth.uid in resource.data.memberIds
+        && onlyChanges(['lastMessage', 'updatedAt', 'activeCall']);
+
+      match /messages/{messageId} {
+        allow read: if isMemberOf(conversationId);
+        allow create: if isMemberOf(conversationId)
+          && request.resource.data.senderId == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 4000;
+      }
+    }
+
+    match /calls/{callId} {
+      allow read: if signedIn() && request.auth.uid in resource.data.memberIds;
+      allow create: if isMemberOf(request.resource.data.conversationId)
+        && request.resource.data.startedBy == request.auth.uid
+        && request.resource.data.memberIds == conversation(request.resource.data.conversationId).memberIds;
+      allow update: if signedIn()
+        && request.auth.uid in resource.data.memberIds
+        && onlyChanges(['status', 'endedAt']);
+
+      // Who is in the call right now. You can only add or remove yourself.
+      match /participants/{userId} {
+        allow read: if isInCallGroup(callId);
+        allow write: if isMe(userId) && isInCallGroup(callId);
+      }
+
+      // WebRTC offers/answers/ICE candidates: only readable by the person they're addressed to.
+      match /signals/{signalId} {
+        allow read: if signedIn() && resource.data.to == request.auth.uid;
+        allow create: if isInCallGroup(callId) && request.resource.data.from == request.auth.uid;
+      }
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "signals",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "to", "order": "ASCENDING" },
+        { "fieldPath": "toSession", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
